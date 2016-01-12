@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform/helper/schema"
 
@@ -118,7 +119,7 @@ func resourceAwsConfigServiceCreate(d *schema.ResourceData, meta interface{}) er
 		deliveryOpts.DeliveryChannel.SnsTopicARN = aws.String(v.(string))
 	}
 
-	_, deliveryErr := conn.PutDeliveryChannel(&deliveryOpts)
+	deliveryErr := putDeliveryChannelWithRetry(conn, &deliveryOpts, 1, 5)
 
 	if deliveryErr != nil {
 		return fmt.Errorf("[FAILURE] Failed to create DeliveryChannel: %s", deliveryErr)
@@ -134,7 +135,7 @@ func resourceAwsConfigServiceCreate(d *schema.ResourceData, meta interface{}) er
 		return fmt.Errorf("Error starting ConfigurationRecorder: %s", startErr)
 	}
 
-	d.SetId(d.Get("name").(string))
+	d.SetId(configName)
 	log.Printf("[INFO] Config ID: %s", d.Id())
 
 	return resourceAwsConfigServiceRead(d, meta)
@@ -340,4 +341,34 @@ func getAwsDeliveryChannel(
 	// Config not found
 	d.SetId("")
 	return nil, nil
+}
+
+func putDeliveryChannelWithRetry(conn *configservice.ConfigService,
+	params *configservice.PutDeliveryChannelInput,
+	count int,
+	max int,
+) error {
+	// PutDeliveryChannel fails if the s3 bucket and roles associated with s3 and ConfigService
+	// were recently created (like right before resource_aws_config). We retry a sepecified
+	// number of times to let the resource "get ready" and then return an error if
+	// it's really not working.
+
+	_, deliveryErr := conn.PutDeliveryChannel(params)
+
+	if deliveryErr != nil {
+		if deliveryErr.(awserr.Error).Code() == "InsufficientDeliveryPolicyException" {
+			if count != max {
+				log.Printf("[DEBUG] PutDeliveryChannel failed, retrying in 1 second")
+				time.Sleep(1 * time.Second)
+				count += 1
+				return putDeliveryChannelWithRetry(conn, params, count, max)
+			} else {
+				return deliveryErr
+			}
+		} else {
+			return deliveryErr
+		}
+	}
+
+	return nil
 }
